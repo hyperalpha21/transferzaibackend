@@ -1,6 +1,5 @@
-fastapi
-uvicorn
-pandas
-sentence-transformers
-scipy
-torch
+streamlit==1.37.0
+pandas==2.2.2
+torch==2.2.2
+sentence-transformers==2.7.0
+scipy==1.13.1
