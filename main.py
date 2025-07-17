@@ -5,34 +5,36 @@ from scipy.special import expit
 from io import BytesIO
 import os
 
-# === Logistic regression coefficients ===
+# === Logistic regression coefficients (new model) ===
 B0, B1, B2 = -8.980140381396076, 7.763385577321117, 6.11064786318868
 
-# === File path ===
+# === CSV path ===
 CSV_PATH = "wm_courses_2025.csv"
 
-# === Streamlit page config ===
-st.set_page_config(page_title="TransferzAI", layout="wide", page_icon="🎓")
-st.title("TransferzAI – Course Transfer Predictor")
-st.write(
-    "Paste one or more courses in `Title | Description` format to find the closest WM match & transfer likelihood."
+# === Streamlit basic config ===
+st.set_page_config(
+    page_title="TransferzAI",
+    layout="wide",
+    page_icon="🎓"
 )
+st.title("🎓 TransferzAI – Course Transfer Predictor")
+st.write("Paste one or more courses in `Title | Description` format to find the closest WM match & transfer likelihood.")
 
-# === Single cached loader ===
+# === Cache model, data, embeddings ===
 @st.cache_resource
 def load_model_and_data():
-    """Load the model, CSV, and precompute embeddings once."""
-    # Check CSV exists
     if not os.path.exists(CSV_PATH):
-        st.error(f"❌ CSV file `{CSV_PATH}` not found. Please add it to the repo.")
+        st.error(f"❌ Could not find `{CSV_PATH}`. Make sure it's in the repo.")
         st.stop()
-
-    # Load course data
+    
+    # Load catalog
     df = pd.read_csv(CSV_PATH, encoding="latin1").fillna("")
     df["full_text"] = df["course_title"] + ". " + df["course_description"]
 
-    # Load model & compute embeddings
+    # Load model
     model = SentenceTransformer("BAAI/bge-small-en-v1.5")
+
+    # Precompute embeddings
     embeddings = model.encode(
         df["full_text"].tolist(),
         batch_size=32,
@@ -41,30 +43,29 @@ def load_model_and_data():
     )
     return model, df, embeddings
 
-# === Load everything on startup ===
-with st.spinner("⏳ Loading model & course catalog (first run may take ~30s)..."):
+# === Load once on startup ===
+with st.spinner("⏳ Loading model & catalog… (first time ≈30s)"):
     model, wm_df, wm_embeddings = load_model_and_data()
-st.success("✅ Model & catalog ready!")
+st.success("✅ Model & catalog loaded!")
 
-# === Prediction function ===
+# === Core function ===
 def predict_transfer(title, desc):
-    """Predict closest WM course and likelihood."""
-    # Encode input text
-    title_emb = model.encode([title], convert_to_tensor=True, normalize_embeddings=True)
-    desc_emb  = model.encode([desc],  convert_to_tensor=True, normalize_embeddings=True)
+    # Encode user course
+    t_emb = model.encode([title], convert_to_tensor=True, normalize_embeddings=True)
+    d_emb = model.encode([desc],  convert_to_tensor=True, normalize_embeddings=True)
 
-    # Find closest WM course
-    sim_title = util.cos_sim(title_emb, wm_embeddings)[0]
-    sim_desc  = util.cos_sim(desc_emb, wm_embeddings)[0]
-    sim_combined = 0.5 * sim_title + 0.5 * sim_desc
-    best_idx = int(sim_combined.argmax())
-    best_course = wm_df.iloc[best_idx]
+    # Find closest WM course by similarity
+    sim_t = util.cos_sim(t_emb, wm_embeddings)[0]
+    sim_d = util.cos_sim(d_emb, wm_embeddings)[0]
+    combined_sim = 0.5 * sim_t + 0.5 * sim_d
+    idx = int(combined_sim.argmax())
+    best_course = wm_df.iloc[idx]
 
-    # Compute exact features for logistic model
-    best_title_emb = model.encode([best_course["course_title"]], convert_to_tensor=True, normalize_embeddings=True)
-    best_desc_emb  = model.encode([best_course["course_description"]], convert_to_tensor=True, normalize_embeddings=True)
-    title_match = float(util.cos_sim(title_emb, best_title_emb)[0][0])
-    desc_match  = float(util.cos_sim(desc_emb, best_desc_emb)[0][0])
+    # Logistic regression probability
+    best_t_emb = model.encode([best_course["course_title"]], convert_to_tensor=True, normalize_embeddings=True)
+    best_d_emb = model.encode([best_course["course_description"]], convert_to_tensor=True, normalize_embeddings=True)
+    title_match = float(util.cos_sim(t_emb, best_t_emb)[0][0])
+    desc_match  = float(util.cos_sim(d_emb, best_d_emb)[0][0])
     prob = float(expit(B0 + B1 * title_match + B2 * desc_match))
 
     # Confidence tier
@@ -78,29 +79,27 @@ def predict_transfer(title, desc):
         tier, status = "❌ Unlikely Transfer", "Unlikely"
 
     return {
-        "Title": title,
-        "WM Match": f"{best_course['course_code']} | {best_course['course_title']}",
-        "Prob (%)": round(prob * 100, 2),
-        "Tier": tier,
+        "Input Title": title,
+        "Closest WM Match": f"{best_course['course_code']} | {best_course['course_title']}",
+        "Transfer Probability (%)": round(prob * 100, 2),
+        "Result": tier,
         "Status": status
     }
 
-# === User input ===
-st.subheader("Enter Courses")
+# === UI ===
+st.subheader("📋 Enter Multiple Courses")
 st.write(
     "Format each line as:\n```\nIntro to Economics | Supply & demand, markets\nLinear Algebra | Matrices, vectors, transformations\n```"
 )
 
-input_text = st.text_area("Paste courses here", height=200)
+user_input = st.text_area("Paste courses here", height=200)
 
-# === When user clicks Predict ===
-if st.button("Predict Transfers"):
-    if not input_text.strip():
-        st.warning("⚠️ Please enter at least one course.")
+if st.button("🔍 Predict Transfers"):
+    if not user_input.strip():
+        st.warning("⚠️ Please enter at least one course!")
     else:
-        with st.spinner("🔍 Analyzing courses..."):
-            # Split lines and process
-            lines = [line.strip() for line in input_text.split("\n") if line.strip()]
+        with st.spinner("Analyzing all courses…"):
+            lines = [line.strip() for line in user_input.split("\n") if line.strip()]
             results = []
             for line in lines:
                 if "|" in line:
@@ -108,44 +107,45 @@ if st.button("Predict Transfers"):
                     results.append(predict_transfer(title, desc))
                 else:
                     results.append({
-                        "Title": line,
-                        "WM Match": "❌ Invalid format",
-                        "Prob (%)": None,
-                        "Tier": "Skipped",
+                        "Input Title": line,
+                        "Closest WM Match": "❌ Invalid format",
+                        "Transfer Probability (%)": "-",
+                        "Result": "❌ Skipped",
                         "Status": "Skipped"
                     })
-
-            df = pd.DataFrame(results)
+            df_results = pd.DataFrame(results)
 
         # === Color rows ===
-        def highlight_rows(row):
-            if row.Status == "Likely":
-                return ["background-color: #d4fcdc"] * len(row)
-            elif row.Status == "Unlikely":
-                return ["background-color: #fcd4d4"] * len(row)
+        def color_rows(row):
+            if row["Status"] == "Likely":
+                return ["background-color: #c6f6d5; color: #22543d;"] * len(row)  # green
+            elif row["Status"] == "Unlikely":
+                return ["background-color: #fed7d7; color: #742a2a;"] * len(row)  # red
             else:
-                return [""] * len(row)
+                return ["background-color: #edf2f7; color: #4a5568;"] * len(row)  # gray
 
-        st.subheader("Results")
-        st.dataframe(df.style.apply(highlight_rows, axis=1), use_container_width=True)
+        # Show table
+        st.subheader("📊 Predictions")
+        st.dataframe(df_results.style.apply(color_rows, axis=1), use_container_width=True)
 
-        # === Summary ===
-        likely = (df.Status == "Likely").sum()
-        unlikely = (df.Status == "Unlikely").sum()
-        skipped = (df.Status == "Skipped").sum()
+        # Summary counts
+        likely_count = (df_results["Status"] == "Likely").sum()
+        unlikely_count = (df_results["Status"] == "Unlikely").sum()
+        skipped_count = (df_results["Status"] == "Skipped").sum()
 
         st.markdown("---")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Likely Transfers", likely)
-        col2.metric("Unlikely Transfers", unlikely)
-        col3.metric("Skipped", skipped)
+        st.subheader("📈 Summary")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("✅ Likely Transfers", likely_count)
+        c2.metric("❌ Unlikely Transfers", unlikely_count)
+        c3.metric("⏭️ Skipped", skipped_count)
 
-        # === CSV Download ===
-        buf = BytesIO()
-        df.to_csv(buf, index=False)
+        # CSV download
+        csv_buffer = BytesIO()
+        df_results.to_csv(csv_buffer, index=False)
         st.download_button(
-            "💾 Download CSV",
-            buf.getvalue(),
-            "transfer_results.csv",
-            "text/csv"
+            label="💾 Download Results as CSV",
+            data=csv_buffer.getvalue(),
+            file_name="transferai_results.csv",
+            mime="text/csv",
         )
